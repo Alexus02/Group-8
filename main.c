@@ -4,8 +4,6 @@
  *   - Search shows exact match first, then best matches
  *   - Update can rename (with duplicate-name check); delete is soft-delete.
  *   - Improved input safety for fgets/scanf.
- *
- * 
  */
 
 #include <stdio.h>
