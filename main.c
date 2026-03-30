@@ -8,18 +8,25 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>   /* 4097024 - added to support qsort (sort) and atoi (ID parsing) */
 
-#define MAX_CONTACTS 100
+#define MAX_CONTACTS 200
 #define NAME_LEN 100
 #define PHONE_LEN 30
 #define EMAIL_LEN 100
+#define DATA_FILE    /* 4097024 - binary file used to persist contacts between runs */
 
 typedef struct {
+    int  id;    /* 4097024 - unique auto-incrementing ID, stable even after renames */
 	char name[NAME_LEN];
 	char phone[PHONE_LEN];
 	char email[EMAIL_LEN];
 	int isActive;
 } Contact;
+
+Contact contacts[MAX_CONTACTS];
+int     count   = 0;
+int     next_id = 1;    /* 4097024 - ID counter; saved to file so IDs never repeat across runs */
 
 void removeNewline(char text[]) {
 	int i;
@@ -127,27 +134,19 @@ int isValidEmail(const char email[]) {
 }
 
 /* Prefer an inactive slot before growing count */
-int findAvailableSlot(Contact contacts[], int count) {
-	int i;
-	for (i = 0; i < count; i++) {
-		if (!contacts[i].isActive) {
-			return i;
-		}
-	}
-	if (count < MAX_CONTACTS) {
-		return count;
-	}
-	return -1;
+int findAvailableSlot(void) {
+    int i;
+    for (i = 0; i < count; i++)
+        if (!contacts[i].isActive) return i;
+    if (count < MAX_CONTACTS) return count;
+    return -1;
 }
-
-int hasActiveContacts(Contact contacts[], int count) {
-	int i;
-	for (i = 0; i < count; i++) {
-		if (contacts[i].isActive) {
-			return 1;
-		}
-	}
-	return 0;
+ 
+int hasActiveContacts(void) {
+    int i;
+    for (i = 0; i < count; i++)
+        if (contacts[i].isActive) return 1;
+    return 0;
 }
 
 int findByName(Contact contacts[], int count, char name[]) {
@@ -172,6 +171,63 @@ int findOtherActiveByName(Contact contacts[], int count, char name[], int exclud
 		}
 	}
 	return -1;
+}
+
+/* 4097024 - lookup by numeric ID so single-contact view works even if name has been changed */
+int findById(int id) {
+    int i;
+    for (i = 0; i < count; i++)
+        if (contacts[i].isActive && contacts[i].id == id)
+            return i;
+    return -1;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  4097024 - Persistence: save / load contacts to binary file
+ *  saveContacts() is called automatically after every write
+ *  loadContacts() runs once on startup to restore previous data
+ * ═══════════════════════════════════════════════════════════ */
+ 
+void saveContacts(void) {
+    FILE *fp = fopen(DATA_FILE, "wb");
+    if (!fp) { perror("  [!] Cannot save"); return; }
+    fwrite(&count,    sizeof(int),     1,     fp);
+    fwrite(&next_id,  sizeof(int),     1,     fp);
+    fwrite(contacts,  sizeof(Contact), count, fp);
+    fclose(fp);
+    printf("  [✓] Saved %d contact(s).\n", count);
+}
+ 
+void loadContacts(void) {
+    FILE *fp = fopen(DATA_FILE, "rb");
+    if (!fp) return;                   /* first run — no file yet */
+    fread(&count,   sizeof(int),     1,     fp);
+    fread(&next_id, sizeof(int),     1,     fp);
+    fread(contacts, sizeof(Contact), count, fp);
+    fclose(fp);
+    printf("  [✓] Loaded %d contact(s).\n", count);
+}
+ 
+void printTableHeader(void) {
+    printf("\n  %-5s  %-20s  %-15s  %-25s  %s\n",
+           "ID", "Name", "Phone", "Email", "Address");
+    printf("  %s\n",
+           "─────────────────────────────────────────────────────────────────────────────");
+}
+ 
+void printTableRow(const Contact *c) {
+    printf("  %-5d  %-20s  %-15s  %-25s  %s\n",
+           c->id, c->name, c->phone, c->email, c->address);
+}
+ 
+void printContactBox(const Contact *c) {
+    printf("\n  ┌──────────────────────────────────────────────┐\n");
+    printf("  │  ID      : %-34d │\n", c->id);
+    printf("  │  Name    : %-34s │\n", c->name);
+    printf("  │  Phone   : %-34s │\n", c->phone);
+    printf("  │  Email   : %-34s │\n", c->email);
+    printf("  │  Address : %-34s │\n", c->address);
+    printf("  └──────────────────────────────────────────────┘\n");
 }
 
 void addContact(Contact contacts[], int *count) {
@@ -220,14 +276,15 @@ void addContact(Contact contacts[], int *count) {
 		}
 		printf("Invalid email address. Try again.\n");
 	}
-
+    contacts[slot].id       = next_id++;   /* 4097024 - assign next available ID then increment counter */ 
 	strcpy(contacts[*count].name, name);
 	strcpy(contacts[*count].phone, phone);
 	strcpy(contacts[*count].email, email);
 	contacts[*count].isActive = 1;
 	(*count)++;
 
-	printf("Contact added successfully.\n");
+	printf("  [✓] Contact '%s' added (ID %d).\n", name, contacts[slot].id);
+    saveContacts();   /* 4097024 - auto-save after every add so no data is lost on crash */
 }
 
 /*
