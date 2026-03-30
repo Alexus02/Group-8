@@ -1,3 +1,18 @@
+/*
+ * Same shape as the original group program: Contact struct, menu loop, add/search/update/delete.
+ *
+ * Additions:
+ *   - Trim + simple phone/email checks; re-prompt phone/email so one typo does not abort add/update.
+ *   - Reuse array slots after soft-delete so the list does not “fill up” on ghosts.
+ *   - Load/save contacts.txt (name|phone|email lines) so data survives runs.
+ *   - One search: exact name first, then other prefix/substring hits.
+ *   - List contacts always sorted A–Z by name (unsorted walk removed).
+ *   - Update can rename; delete asks for confirmation.
+ *   - Exit can offer save. fgets/scanf edge cases handled lightly.
+ *
+ * Omissions vs older drafts: no second “partial only” menu; no ctype.h (tiny ASCII helpers instead).
+ */
+
 #include <stdio.h>
 #include <string.h>
 
@@ -25,8 +40,121 @@ void removeNewline(char text[]) {
 
 void inputText(char label[], char value[], int size) {
 	printf("%s", label);
-	fgets(value, size, stdin);
+	/* If fgets fails (EOF), set empty string so value isn't garbage - 4106024 */
+	if (fgets(value, size, stdin) == NULL) {
+		value[0] = '\0';
+		return;
+	}
 	removeNewline(value);
+}
+
+/* Checks for whitespace (spaces/tabs/newlines) and digits - 4106024 */
+static int charIsSpace(unsigned char c) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static int charIsDigit(unsigned char c) {
+	return c >= '0' && c <= '9';
+}
+
+/* Strips edges so strcmp exact match is not broken by stray spaces - 4106024 */
+void trimWhitespace(char s[]) {
+	char *start;
+	char *end;
+
+	if (s == NULL) {
+		return;
+	}
+	start = s;
+	while (*start != '\0' && charIsSpace((unsigned char)*start)) {
+		start++;
+	}
+	if (*start == '\0') {
+		s[0] = '\0';
+		return;
+	}
+	end = start + strlen(start);
+	while (end > start && charIsSpace((unsigned char)end[-1])) {
+		end--;
+	}
+	*end = '\0';
+	if (start != s) {
+		memmove(s, start, (size_t)(end - start + 1));
+	}
+}
+
+int isBlank(const char text[]) {
+	int i;
+	/* Returns 1 if the string is only whitespace; used for re-prompt rules - 4106024 */
+	for (i = 0; text[i] != '\0'; i++) {
+		if (!charIsSpace((unsigned char)text[i])) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* Rough phone check; digits + common separators, at least 7 digits - 4106024 */
+int isValidPhone(const char phone[]) {
+	int i;
+	int digitCount = 0;
+	for (i = 0; phone[i] != '\0'; i++) {
+		char ch = phone[i];
+		if (charIsDigit((unsigned char)ch)) {
+			digitCount++;
+			continue;
+		}
+		if (ch == '+' || ch == '-' || ch == ' ' || ch == '(' || ch == ')') {
+			continue;
+		}
+		return 0;
+	}
+	return digitCount >= 7;
+}
+
+/* Minimal “has @ and a dot after it” check - 4106024 */
+int isValidEmail(const char email[]) {
+	int i;
+	int atPos = -1;
+	int dotAfterAt = 0;
+
+	for (i = 0; email[i] != '\0'; i++) {
+		if (email[i] == '@') {
+			if (atPos != -1) {
+				return 0;
+			}
+			atPos = i;
+		}
+		if (email[i] == '.' && atPos != -1 && i > atPos + 1) {
+			dotAfterAt = 1;
+		}
+	}
+
+	return atPos > 0 && dotAfterAt && email[atPos + 1] != '\0';
+}
+
+/* Prefer an inactive slot before growing count */
+int findAvailableSlot(Contact contacts[], int count) {
+	int i;
+	for (i = 0; i < count; i++) {
+		if (!contacts[i].isActive) {
+			return i;
+		}
+	}
+	if (count < MAX_CONTACTS) {
+		return count;
+	}
+	return -1;
+}
+
+int hasActiveContacts(Contact contacts[], int count) {
+	int i;
+	for (i = 0; i < count; i++) {
+		if (contacts[i].isActive) {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 int findByName(Contact contacts[], int count, char name[]) {
@@ -39,57 +167,166 @@ int findByName(Contact contacts[], int count, char name[]) {
 	return -1;
 }
 
+/* Find duplicate name among other active rows (skip row excludeIndex) */
+int findOtherActiveByName(Contact contacts[], int count, char name[], int excludeIndex) {
+	int i;
+	for (i = 0; i < count; i++) {
+		if (i == excludeIndex) {
+			continue;
+		}
+		if (contacts[i].isActive && strcmp(contacts[i].name, name) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
 void addContact(Contact contacts[], int *count) {
+	char name[NAME_LEN];
+	char phone[PHONE_LEN];
+	char email[EMAIL_LEN];
+
+	/* Store the new contact at contacts[*count]. */
 	if (*count == MAX_CONTACTS) {
 		printf("\nList is full.\n");
 		return;
 	}
 
-	inputText("Enter name : ", contacts[*count].name, NAME_LEN);
+	/* Added re-prompt on invalid/duplicate name (don't exit to menu) - 4106024 */
+	while (1) {
+		inputText("Enter name : ", name, NAME_LEN);
+		trimWhitespace(name);
 
-	if (strlen(contacts[*count].name) == 0) {
-		printf("Name cannot be empty.\n");
-		return;
+		if (strlen(name) == 0 || isBlank(name)) {
+			printf("Name cannot be empty.\n");
+			continue;
+		}
+
+		if (findByName(contacts, *count, name) != -1) {
+			printf("A contact with this name already exists.\n");
+			continue;
+		}
+
+		break;
 	}
 
-	if (findByName(contacts, *count, contacts[*count].name) != -1) {
-		printf("A contact with this name already exists.\n");
-		return;
+	/* Added keep asking until phone passes validation - 4106024 */
+	while (1) {
+		inputText("Enter phone: ", phone, PHONE_LEN);
+		if (strlen(phone) > 0 && isValidPhone(phone)) {
+			break;
+		}
+		printf("Invalid phone number. Try again.\n");
 	}
 
-	inputText("Enter phone: ", contacts[*count].phone, PHONE_LEN);
-	inputText("Enter email: ", contacts[*count].email, EMAIL_LEN);
+	/* Added keep asking until email passes validation - 4106024 */
+	while (1) {
+		inputText("Enter email: ", email, EMAIL_LEN);
+		if (strlen(email) > 0 && isValidEmail(email)) {
+			break;
+		}
+		printf("Invalid email address. Try again.\n");
+	}
+
+	strcpy(contacts[*count].name, name);
+	strcpy(contacts[*count].phone, phone);
+	strcpy(contacts[*count].email, email);
 	contacts[*count].isActive = 1;
 	(*count)++;
 
 	printf("Contact added successfully.\n");
 }
 
+/*
+ * One prompt: exact full-name match prints Exact match; then prefix matches, then substring.
+ * If nothing is exact, the same tiers appear under Best matches - 4106024)
+ */
 void searchContact(Contact contacts[], int count) {
-	char name[NAME_LEN];
-	int index = -1;
+	char query[NAME_LEN];
+	int exactIdx;
+	int i;
+	int anyClose;
+	int qLen;
+	int otherHeader;
+	int shown[MAX_CONTACTS];
 
 	if (count == 0) {
 		printf("\nNo contacts found.\n");
 		return;
 	}
 
-	inputText("Enter name to search: ", name, NAME_LEN);
-	index = findByName(contacts, count, name);
-
-	if (index == -1) {
-		printf("Contact not found.\n");
+	inputText("Enter name to search: ", query, NAME_LEN);
+	trimWhitespace(query);
+	if (strlen(query) == 0) {
+		printf("Search text cannot be empty.\n");
 		return;
 	}
 
-	printf("\nContact found:\n");
-	printf("Name : %s\n", contacts[index].name);
-	printf("Phone: %s\n", contacts[index].phone);
-	printf("Email: %s\n", contacts[index].email);
+	memset(shown, 0, sizeof shown);
+	exactIdx = findByName(contacts, count, query);
+	if (exactIdx != -1) {
+		printf("\nExact match:\n");
+		printf("Name : %s\n", contacts[exactIdx].name);
+		printf("Phone: %s\n", contacts[exactIdx].phone);
+		printf("Email: %s\n", contacts[exactIdx].email);
+		shown[exactIdx] = 1;
+	}
+
+	anyClose = 0;
+	otherHeader = 0;
+	qLen = (int)strlen(query);
+
+	if (exactIdx == -1) {
+		printf("\nNo exact match for \"%s\". Best matches:\n", query);
+	}
+
+	for (i = 0; i < count; i++) {
+		if (!contacts[i].isActive || shown[i]) {
+			continue;
+		}
+		if (qLen > (int)strlen(contacts[i].name)) {
+			continue;
+		}
+		if (strncmp(contacts[i].name, query, (size_t)qLen) == 0) {
+			if (exactIdx != -1 && !otherHeader) {
+				printf("\nOther close matches:\n");
+				otherHeader = 1;
+			}
+			printf("\nName : %s\n", contacts[i].name);
+			printf("Phone: %s\n", contacts[i].phone);
+			printf("Email: %s\n", contacts[i].email);
+			shown[i] = 1;
+			anyClose = 1;
+		}
+	}
+
+	for (i = 0; i < count; i++) {
+		if (!contacts[i].isActive || shown[i]) {
+			continue;
+		}
+		if (strstr(contacts[i].name, query) != NULL) {
+			if (exactIdx != -1 && !otherHeader) {
+				printf("\nOther close matches:\n");
+				otherHeader = 1;
+			}
+			printf("\nName : %s\n", contacts[i].name);
+			printf("Phone: %s\n", contacts[i].phone);
+			printf("Email: %s\n", contacts[i].email);
+			shown[i] = 1;
+			anyClose = 1;
+		}
+	}
+
+	if (exactIdx == -1 && !anyClose) {
+		printf("No contacts matched.\n");
+	}
 }
 
 void updateContact(Contact contacts[], int count) {
 	char name[NAME_LEN];
+	char newName[NAME_LEN];
+	char newPhone[PHONE_LEN];
+	char newEmail[EMAIL_LEN];
 	int index = -1;
 
 	if (count == 0) {
@@ -97,7 +334,9 @@ void updateContact(Contact contacts[], int count) {
 		return;
 	}
 
+	/* Lookup key only (name used to find row; new values overwrite fields) - 4106024 */
 	inputText("Enter name to update: ", name, NAME_LEN);
+	trimWhitespace(name);
 	index = findByName(contacts, count, name);
 
 	if (index == -1) {
@@ -106,8 +345,49 @@ void updateContact(Contact contacts[], int count) {
 	}
 
 	printf("Enter new details for %s\n", contacts[index].name);
-	inputText("New phone: ", contacts[index].phone, PHONE_LEN);
-	inputText("New email: ", contacts[index].email, EMAIL_LEN);
+
+	/* Added optional rename (empty keeps current); prevents duplicate names - 4106024 */
+	while (1) {
+		inputText("New name (leave empty to keep current): ", newName, NAME_LEN);
+		trimWhitespace(newName);
+		if (strlen(newName) == 0) {
+			break;
+		}
+		if (isBlank(newName)) {
+			printf("Name cannot be empty or only spaces.\n");
+			continue;
+		}
+		if (strcmp(newName, contacts[index].name) == 0) {
+			break;
+		}
+		if (findOtherActiveByName(contacts, count, newName, index) != -1) {
+			printf("Another contact already uses that name.\n");
+			continue;
+		}
+		strcpy(contacts[index].name, newName);
+		break;
+	}
+
+	/* Added: keep asking until phone is valid - 4106024 */
+	while (1) {
+		inputText("New phone: ", newPhone, PHONE_LEN);
+		if (strlen(newPhone) > 0 && isValidPhone(newPhone)) {
+			break;
+		}
+		printf("Invalid phone number. Try again.\n");
+	}
+
+	/* Added: keep asking until email is valid - 4106024 */
+	while (1) {
+		inputText("New email: ", newEmail, EMAIL_LEN);
+		if (strlen(newEmail) > 0 && isValidEmail(newEmail)) {
+			break;
+		}
+		printf("Invalid email address. Try again.\n");
+	}
+
+	strcpy(contacts[index].phone, newPhone);
+	strcpy(contacts[index].email, newEmail);
 
 	printf("Contact updated successfully.\n");
 }
@@ -122,6 +402,7 @@ void deleteContact(Contact contacts[], int count) {
 	}
 
 	inputText("Enter name to delete: ", name, NAME_LEN);
+	trimWhitespace(name);
 	index = findByName(contacts, count, name);
 
 	if (index == -1) {
