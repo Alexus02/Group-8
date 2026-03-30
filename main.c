@@ -1,16 +1,11 @@
 /*
- * Same shape as the original group program: Contact struct, menu loop, add/search/update/delete.
- *
  * Additions:
- *   - Trim + simple phone/email checks; re-prompt phone/email so one typo does not abort add/update.
- *   - Reuse array slots after soft-delete so the list does not “fill up” on ghosts.
- *   - Load/save contacts.txt (name|phone|email lines) so data survives runs.
- *   - One search: exact name first, then other prefix/substring hits.
- *   - List contacts always sorted A–Z by name (unsorted walk removed).
- *   - Update can rename; delete asks for confirmation.
- *   - Exit can offer save. fgets/scanf edge cases handled lightly.
+ *   - if name/phone/email is invalid, re-prompt instead of breaking.
+ *   - Search shows exact match first, then best matches
+ *   - Update can rename (with duplicate-name check); delete is soft-delete.
+ *   - Improved input safety for fgets/scanf.
  *
- * Omissions vs older drafts: no second “partial only” menu; no ctype.h (tiny ASCII helpers instead).
+ * 
  */
 
 #include <stdio.h>
@@ -408,6 +403,17 @@ void deleteContact(Contact contacts[], int count) {
 	if (index == -1) {
 		printf("Contact not found.\n");
 		return;
+	}
+
+	/* Confirm before marking the contact as deleted (soft-delete) - 4106024 */
+	{
+		char confirm[16];
+		printf("Delete \"%s\"? Type y to confirm, anything else cancels: ", contacts[index].name);
+		inputText("", confirm, (int)sizeof confirm);
+		if (confirm[0] != 'y' && confirm[0] != 'Y') {
+			printf("Delete cancelled.\n");
+			return;
+		}
 	}
 
 	contacts[index].isActive = 0;
